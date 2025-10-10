@@ -7,6 +7,31 @@ from mutagen.flac import FLAC
 from mutagen.id3 import ID3
 from mutagen.mp4 import MP4
 
+fullwidth_map = str.maketrans({
+    '*': '＊', '?': '？', ':': '：', '<': '＜', '>': '＞',
+    '"': '＂', '|': '｜', '/': '／', '\\': '＼',
+})
+
+def make_safe_path(raw_path: str) -> Path:
+
+    expanded = os.path.expandvars(raw_path)
+    p = Path(expanded)
+    drive = p.drive
+    root = p.root
+    parts = list(p.parts)
+
+    safe_parts = []
+    for i, part in enumerate(parts):
+        if i == 0 and (part == drive or part == f"{drive}{root}" or part == root):
+            safe_parts.append(part)
+            continue
+        safe = part.translate(fullwidth_map).strip()
+        if not safe:
+            safe = "_"
+        safe_parts.append(safe)
+
+    return Path(*safe_parts).resolve(strict=False)
+
 def read_basic_tags(path: Path) -> Dict[str, Any]:
 
     def _first(v):
@@ -170,8 +195,12 @@ def flac_to_alac_fp(src: Path, dst: Path):
 
 def main():
 
-    input_path = Path(input('Enter Input Path'))
-    output_path = Path(os.path.join(str(os.getenv('OUTPUT_PATH')), input('Enter Output Subfolder name')) if os.getenv('OUTPUT_PATH') else input('Enter Output Path'))
+    input_path = Path(input('Enter Input Path').strip().strip('"').strip("'"))
+    output_path = Path(
+        os.path.join(str(os.getenv('OUTPUT_PATH')), input('Enter Output Subfolder name'))
+        if os.getenv('OUTPUT_PATH')
+        else input('Enter Output Path').strip().strip('"').strip("'")
+    )
 
     # 찾고 싶은 확장자 목록
     exts = {".flac", ".wav", ".alac", ".m4a", ".mp3", ".aac"}
@@ -179,31 +208,38 @@ def main():
     # 재귀적으로 모든 하위 폴더 탐색
     all_audio_file_list = [p for p in input_path.rglob("*") if p.suffix.lower() in exts]
 
+    print(all_audio_file_list)
+
     for each_audio_file in all_audio_file_list:
 
         audio_file_tags = read_basic_tags(each_audio_file)
 
-        audio_dirname = f'{audio_file_tags["albumartist"]} - {audio_file_tags["album"]} ({audio_file_tags["year"]})'
-        audio_basename = f'{audio_file_tags["disc"]} - {audio_file_tags["track"]} - {audio_file_tags["title"]}'
+        audio_basedir = f'{audio_file_tags["albumartist"]} - {audio_file_tags["album"]} ({audio_file_tags["year"]})'
+        audio_basename = f'{str(audio_file_tags["disc"]).zfill(2)} - {str(audio_file_tags["track"]).zfill(2)} - {audio_file_tags["title"]}'.translate(fullwidth_map)
 
-        os.makedirs(os.path.join(output_path, audio_dirname), exist_ok=True)
+        audio_fulldir = make_safe_path(os.path.join(output_path, audio_basedir))
+
+        print(audio_fulldir)
+
+        os.makedirs(audio_fulldir, exist_ok=True)
 
         if each_audio_file.suffix == '.flac':
 
             input_filename = each_audio_file
-            output_filename = Path(os.path.join(audio_dirname, f'{audio_basename}.alac'))
+            output_filename = Path(os.path.join(audio_fulldir, f'{audio_basename}.m4a'))
 
             flac_to_alac_fp(input_filename, output_filename)
 
         else:
 
             input_filename = each_audio_file
-            output_filename = Path(os.path.join(audio_dirname, f'{audio_basename}{each_audio_file.suffix}'))
+            output_filename = Path(os.path.join(audio_fulldir, f'{audio_basename}{each_audio_file.suffix}'))
 
             shutil.copy2(input_filename, output_filename)
 
     print('Finished!')
 
 if __name__ == "__main__":
+    load_dotenv()
     main()
 
