@@ -1,4 +1,5 @@
-import ffmpeg, os, shutil
+# requires ffmpeg and ffprobe
+import ffmpeg, os, shutil, subprocess
 from dotenv import load_dotenv
 from pathlib import Path
 from typing import Optional, Tuple, Dict, Any
@@ -167,31 +168,59 @@ def read_basic_tags(path: Path) -> Dict[str, Any]:
 
     return out
 
-def flac_to_alac_fp(src: Path, dst: Path):
-    """
-    FLAC → ALAC(.m4a) 변환 (무손실 + 메타데이터/커버/챕터 보존)
-    """
-    dst = dst.with_suffix(".m4a")
-    dst.parent.mkdir(parents=True, exist_ok=True)
+def flac_to_alac(input_path, output_path=None, force_png_cover=False):
 
-    (
-        ffmpeg
-        .input(str(src))
-        .output(
-            str(dst),
-            **{
-                "c:a": "alac",            # 오디오: ALAC 무손실 인코딩
-                "c:v": "copy",            # 커버아트 그대로 복사
-                "disposition:v": "attached_pic",  # 커버아트를 '첨부 그림'으로 표시
-                "map": "0",               # 원본의 모든 스트림 매핑
-                "map_metadata": "0",      # 모든 메타데이터 복사
-                "map_chapters": "0",      # 챕터 복사
-                "movflags": "use_metadata_tags",  # m4a 태그로 반영
-            }
+    def has_attached_pic(input_file: str) -> bool:
+        # 커버 아트(비디오 스트림)가 있는지 ffprobe로 확인
+        probe = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v",
+                "-show_entries", "stream=codec_name,disposition",
+                "-of", "csv=p=0", input_file
+            ],
+            text=True, capture_output=True, encoding="utf-8", errors="ignore"
         )
-        .overwrite_output()  # 이미 존재하면 덮어쓰기
-        .run(quiet=False)
-    )
+        if probe.returncode != 0:
+            return False
+        # 비디오 스트림이 있고 attached_pic이면 True
+        for line in probe.stdout.splitlines():
+            # 예: mjpeg|attached_pic=1
+            if "attached_pic=1" in line or 'mjpeg' in line:
+                return True
+        return False
+
+    input_path = Path(input_path)
+    if output_path is None:
+        output_path = input_path.with_suffix(".m4a")
+
+    # 커버 아트 존재 여부 확인
+    cover_exists = has_attached_pic(str(input_path))
+
+    # 기본 명령 구성
+    cmd = ["ffmpeg", "-y", "-i", str(input_path),
+           "-map", "0:a",
+           "-c:a", "alac"]
+
+    if cover_exists:
+        cmd += ["-map", "0:v?"]
+        # 커버를 복사하거나, 필요 시 PNG로 재인코딩
+        if force_png_cover:
+            cmd += ["-c:v", "png"]
+        else:
+            cmd += ["-c:v", "copy"]
+        cmd += ["-disposition:v", "attached_pic"]
+
+    cmd += [str(output_path)]
+
+    try:
+        subprocess.run(cmd, text=True, capture_output=True, encoding="utf-8", errors="ignore")
+    except RuntimeError:
+        # 커버가 문제일 가능성 → PNG로 재시도
+        if cover_exists and not force_png_cover:
+            print("커버 아트 복사에 실패하여 PNG로 재인코딩해 다시 시도합니다.")
+            return flac_to_alac(input_path, output_path, force_png_cover=True)
+        raise
 
 def main():
 
@@ -208,27 +237,25 @@ def main():
     # 재귀적으로 모든 하위 폴더 탐색
     all_audio_file_list = [p for p in input_path.rglob("*") if p.suffix.lower() in exts]
 
-    print(all_audio_file_list)
-
     for each_audio_file in all_audio_file_list:
 
         audio_file_tags = read_basic_tags(each_audio_file)
 
-        audio_basedir = f'{audio_file_tags["albumartist"]} - {audio_file_tags["album"]} ({audio_file_tags["year"]})'
+        audio_basedir = f'{audio_file_tags["albumartist"]} - {audio_file_tags["album"]}'.translate(fullwidth_map)
         audio_basename = f'{str(audio_file_tags["disc"]).zfill(2)} - {str(audio_file_tags["track"]).zfill(2)} - {audio_file_tags["title"]}'.translate(fullwidth_map)
 
         audio_fulldir = make_safe_path(os.path.join(output_path, audio_basedir))
 
-        print(audio_fulldir)
-
         os.makedirs(audio_fulldir, exist_ok=True)
+
+        print(f'현재 작업 중인 대상: {audio_basename} (앨범: {audio_basedir})')
 
         if each_audio_file.suffix == '.flac':
 
             input_filename = each_audio_file
             output_filename = Path(os.path.join(audio_fulldir, f'{audio_basename}.m4a'))
 
-            flac_to_alac_fp(input_filename, output_filename)
+            flac_to_alac(input_filename, output_filename)
 
         else:
 
