@@ -222,6 +222,119 @@ def flac_to_alac(input_path, output_path=None, force_png_cover=False):
             return flac_to_alac(input_path, output_path, force_png_cover=True)
         raise
 
+def wav_to_alac(input_path, output_path=None, force_png_cover=False, force_sample_fmt=None):
+    """
+    WAV(PCM) → ALAC(.m4a) 변환
+    - force_sample_fmt: None | "s16" | "s24" | "s32"
+      (32-bit float WAV 등을 명시적으로 정수 포맷으로 변환하고 싶을 때 사용)
+    """
+
+    def has_attached_pic(input_file: str) -> bool:
+        probe = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v",
+                "-show_entries", "stream=codec_name,disposition",
+                "-of", "csv=p=0", input_file
+            ],
+            text=True, capture_output=True, encoding="utf-8", errors="ignore"
+        )
+        if probe.returncode != 0:
+            return False
+        for line in probe.stdout.splitlines():
+            # 예: mjpeg|attached_pic=1
+            if "attached_pic=1" in line or "mjpeg" in line:
+                return True
+        return False
+
+    input_path = Path(input_path)
+    if output_path is None:
+        output_path = input_path.with_suffix(".m4a")
+
+    cover_exists = has_attached_pic(str(input_path))
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(input_path),
+        "-map", "0:a",
+        "-c:a", "alac",
+        "-map_metadata", "0",
+        "-movflags", "+faststart"
+    ]
+
+    # 필요 시 샘플 포맷 강제(예: 32-bit float → 24-bit 정수)
+    if force_sample_fmt in {"s16", "s24", "s32"}:
+        cmd += ["-sample_fmt", force_sample_fmt]
+
+    if cover_exists:
+        cmd += ["-map", "0:v?"]
+        if force_png_cover:
+            cmd += ["-c:v", "png"]
+        else:
+            cmd += ["-c:v", "copy"]
+        cmd += ["-disposition:v", "attached_pic"]
+
+    cmd += [str(output_path)]
+
+    try:
+        run = subprocess.run(
+            cmd, text=True, capture_output=True, encoding="utf-8", errors="ignore"
+        )
+        if run.returncode != 0:
+            raise RuntimeError(run.stderr or "ffmpeg failed")
+    except RuntimeError:
+        # 커버 복사 실패 시 PNG로 재시도
+        if cover_exists and not force_png_cover:
+            print("커버 아트 복사에 실패하여 PNG로 재인코딩해 다시 시도합니다.")
+            return wav_to_alac(input_path, output_path, force_png_cover=True, force_sample_fmt=force_sample_fmt)
+        raise
+
+def join_audio_and_video():
+    import os
+    import subprocess
+
+    # 합칠 mkv 파일들이 들어있는 디렉토리 경로
+    input_dir = Path(input('Enter Input Path').strip().strip('"').strip("'"))
+    output_dir = os.path.join(input_dir, "output")
+
+    # 출력 디렉토리 없으면 생성
+    os.makedirs(output_dir, exist_ok=True)
+
+    # 00 ~ 24 반복
+    for i in range(25):
+        nn = f"{i:02d}"  # 00, 01, 02, ..., 24
+        audio_file = os.path.join(input_dir, f"{nn}_audio.mkv")
+        video_file = os.path.join(input_dir, f"{nn}_video.mkv")
+        output_file = os.path.join(output_dir, f"{nn}.mp4")
+
+        # 파일 존재 여부 확인
+        if not os.path.exists(audio_file):
+            print(f"[경고] {audio_file} 이 존재하지 않습니다.")
+            continue
+        if not os.path.exists(video_file):
+            print(f"[경고] {video_file} 이 존재하지 않습니다.")
+            continue
+
+        # ffmpeg 명령 실행
+        cmd = [
+            "ffmpeg",
+            "-i", video_file,
+            "-i", audio_file,
+            "-c:v", "copy",  # 비디오 스트림 복사
+            "-c:a", "aac",  # 오디오는 AAC로 인코딩
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-y",  # 기존 파일 덮어쓰기
+            output_file
+        ]
+
+        print(f"[INFO] {nn}번 파일을 처리 중입니다...")
+        subprocess.run(cmd, check=True)
+        print(f"[완료] {output_file} 생성됨")
+
+    print("모든 파일 처리가 완료되었습니다.")
+
+
 def main():
 
     input_path = Path(input('Enter Input Path').strip().strip('"').strip("'"))
@@ -257,6 +370,13 @@ def main():
 
             flac_to_alac(input_filename, output_filename)
 
+        elif each_audio_file.suffix == '.wav':
+
+            input_filename = each_audio_file
+            output_filename = Path(os.path.join(audio_fulldir, f'{audio_basename}.m4a'))
+
+            wav_to_alac(input_filename, output_filename)
+
         else:
 
             input_filename = each_audio_file
@@ -268,5 +388,6 @@ def main():
 
 if __name__ == "__main__":
     load_dotenv()
+    # join_audio_and_video()
     main()
 
